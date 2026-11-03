@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    container_name: scratch_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-scratch}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-scratch_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-admin_local_secret_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-roles.sql:/docker-entrypoint-initdb.d/01-init-roles.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER:-scratch_admin} -d ${POSTGRES_DB:-scratch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-bookworm
+    container_name: scratch_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: scratch_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://${APP_DB_USER:-scratch_app}:${APP_DB_PASSWORD:-app_local_secret_change_me}@postgres:5432/${POSTGRES_DB:-scratch}
+      - MIGRATOR_DATABASE_URL=postgresql+asyncpg://${MIGRATOR_DB_USER:-scratch_migrator}:${MIGRATOR_DB_PASSWORD:-migrator_local_secret_change_me}@postgres:5432/${POSTGRES_DB:-scratch}
+      - SYNC_MIGRATOR_DATABASE_URL=postgresql://${MIGRATOR_DB_USER:-scratch_migrator}:${MIGRATOR_DB_PASSWORD:-migrator_local_secret_change_me}@postgres:5432/${POSTGRES_DB:-scratch}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - ./apps/api:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: scratch_worker
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker --loglevel=info -Q default
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://${APP_DB_USER:-scratch_app}:${APP_DB_PASSWORD:-app_local_secret_change_me}@postgres:5432/${POSTGRES_DB:-scratch}
+      - MIGRATOR_DATABASE_URL=postgresql+asyncpg://${MIGRATOR_DB_USER:-scratch_migrator}:${MIGRATOR_DB_PASSWORD:-migrator_local_secret_change_me}@postgres:5432/${POSTGRES_DB:-scratch}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: scratch_web
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
